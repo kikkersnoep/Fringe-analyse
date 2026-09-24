@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>Interferometer fransjes-analyse</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#171b21; --border:#2a2f38; --text:#e7eaee; --sub:#9aa4b2;
+    --green:#39d353; --accent:#5da8ff; --warn:#f0a944;
+  }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header{ padding:16px 20px 8px; }
+  h1{ font-size:18px; margin:0 0 4px; font-weight:600;}
+  p.sub{ margin:0; color:var(--sub); font-size:13px; }
+  .stats{ display:flex; gap:18px; padding:10px 20px; flex-wrap:wrap; }
+  .stat{ background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    padding:10px 16px; min-width:140px; }
+  .stat .label{ font-size:11px; color:var(--sub); text-transform:uppercase; letter-spacing:.04em;}
+  .stat .value{ font-size:20px; font-weight:600; margin-top:2px;}
+  .stat .value.warn{ color:var(--warn); }
+  .panel{ margin:10px 20px 14px; background:var(--panel); border:1px solid var(--border);
+    border-radius:12px; padding:14px 14px 8px; }
+  .panel h2{ font-size:13px; margin:0 0 8px; font-weight:600; color:var(--text); }
+  .panel p.desc{ font-size:12px; color:var(--sub); margin:2px 0 10px; }
+  .toolbar{ display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;}
+  .toolbar button{ background:#1f2531; color:var(--text); border:1px solid var(--border); border-radius:8px;
+    padding:6px 12px; font-size:13px; cursor:pointer; }
+  .toolbar button:hover{ background:#2a3140; }
+  .toolbar .hint{ color:var(--sub); font-size:12px; margin-left:auto; }
+  canvas{ width:100%; display:block; border-radius:8px; cursor: grab; touch-action:none;}
+  canvas:active{ cursor: grabbing; }
+  .legend{ display:flex; gap:16px; font-size:12px; color:var(--sub); margin-top:6px; padding-left:4px; flex-wrap:wrap;}
+  .legend span.dot{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; vertical-align:middle;}
+  .tooltip{ position:absolute; background:#20262f; border:1px solid var(--border); border-radius:6px;
+    padding:6px 9px; font-size:12px; pointer-events:none; display:none; white-space:nowrap; z-index:10;}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fransjes-analyse interferometer — meetpunt (x=__X__, y=__Y__)</h1>
+  <p class="sub">__VIDEO_NAME__ &middot; __WIDTH__&times;__HEIGHT__ &middot; __FPS__ fps &middot; __N_FRAMES__ frames &middot; __DURATION__ s</p>
+</header>
+
+<div class="stats">
+  <div class="stat"><div class="label">Volledige cycli (groen&rarr;wit&rarr;groen)</div><div class="value" id="statCycles">&ndash;</div></div>
+  <div class="stat"><div class="label">Totale duur</div><div class="value" id="statDuration">&ndash;</div></div>
+  <div class="stat"><div class="label">Gem. cyclustijd</div><div class="value" id="statAvgPeriod">&ndash;</div></div>
+  <div class="stat"><div class="label">Snelste wisseling</div><div class="value" id="statMinGap">&ndash;</div></div>
+  <div class="stat"><div class="label">Langzaamste wisseling</div><div class="value" id="statMaxGap">&ndash;</div></div>
+</div>
+
+<div class="toolbar" style="margin:0 20px 4px;">
+  <button id="zoomIn">+ Zoom</button>
+  <button id="zoomOut">&minus; Zoom</button>
+  <button id="reset">Reset</button>
+  <span class="hint">Scroll = zoomen &middot; Slepen = pannen &middot; werkt op alle 3 grafieken tegelijk (gedeelde tijd-as) &middot; Hover = details</span>
+</div>
+
+<!-- Grafiek 1: het genormaliseerde, gemeten kleursignaal (0-1) i.p.v. alleen groen/wit -->
+<div class="panel">
+  <h2>1. Gemeten signaal (genormaliseerd, 0&ndash;1)</h2>
+  <p class="desc">Ruwe "groenheid" van het meetpunt per frame, geschaald naar 0&ndash;1. De stippellijn is de classificatiedrempel; het gearceerde gebied is de hysteresis-band (voorkomt flikkeren rond de drempel).</p>
+  <canvas id="chartSignal" height="220"></canvas>
+  <div class="legend">
+    <div><span class="dot" style="background:var(--accent)"></span>genormaliseerd signaal</div>
+    <div><span class="dot" style="background:var(--warn)"></span>drempel &plusmn; hysteresis</div>
+  </div>
+</div>
+
+<!-- Grafiek 2: aantal frames tussen opeenvolgende statuswisselingen (= "frequentie" van veranderingen) -->
+<div class="panel">
+  <h2>2. Snelheid van statuswisselingen (data-zuiverheid check)</h2>
+  <p class="desc">Voor elke groen&harr;wit-wisseling: hoeveel frames zaten er sinds de vorige wisseling? Lage punten dicht bij 0 betekenen zeer snel opeenvolgende wisselingen &mdash; mogelijk ruis in plaats van echte fransjes. De stippellijn toont het gladstrijk-venster; punten daaronder zijn verdacht.</p>
+  <canvas id="chartFreq" height="220"></canvas>
+  <div class="legend">
+    <div><span class="dot" style="background:#e0658f"></span>frames sinds vorige wisseling</div>
+    <div><span class="dot" style="background:var(--warn)"></span>ondergrens (smoothing-venster)</div>
+  </div>
+</div>
+
+<!-- Grafiek 3: de eigenlijke groen/wit classificatie -->
+<div class="panel">
+  <h2>3. Status (groen / wit)</h2>
+  <p class="desc">Het eindresultaat van de classificatie: groen = fringe/constructieve interferentie, wit = achtergrond/destructieve interferentie.</p>
+  <canvas id="chartStatus" height="220"></canvas>
+  <div class="legend">
+    <div><span class="dot" style="background:var(--green)"></span>groen (status = 1)</div>
+    <div><span class="dot" style="background:#5b6472"></span>wit (status = 0)</div>
+  </div>
+</div>
+
+<div id="tooltip" class="tooltip"></div>
+
+<script>
+// Alle meetdata wordt door het Python-script hier ingevoegd als JSON, zodat
+// dit HTML-bestand volledig zelfstandig werkt (geen server/fetch nodig).
+//   t              : tijd in seconden, per frame
+//   state          : status per frame (0 = wit, 1 = groen)
+//   metric_norm    : genormaliseerd signaal (0-1), per frame
+//   threshold_norm : classificatiedrempel, genormaliseerd (0-1)
+//   hysteresis_norm: breedte van de hysteresis-band, genormaliseerd
+//   transitions    : lijst van { frame, time, frames_since_prev } - één entry per statuswisseling
+//   smooth_window  : het aantal frames waarover is gladgestreken (referentielijn in grafiek 2)
+const data = __DATA_JSON__;
+
+(function(){
+  const t = data.t, state = data.state, metricNorm = data.metric_norm;
+  const threshold = data.threshold_norm, hyst = data.hysteresis_norm;
+  const transitions = data.transitions;
+  const smoothWindow = data.smooth_window;
+  const N = t.length;
+  const tMax = t[N-1];
+
+  // ---- statistiekenbalk vullen ----
+  const cycles = Math.round(transitions.length/2);
+  document.getElementById('statCycles').textContent = cycles;
+  document.getElementById('statDuration').textContent = tMax.toFixed(2)+' s';
+  document.getElementById('statAvgPeriod').textContent = (tMax/Math.max(cycles,1)).toFixed(3)+' s';
+  if(transitions.length){
+    const gaps = transitions.map(tr=>tr.frames_since_prev);
+    const minGap = Math.min(...gaps), maxGap = Math.max(...gaps);
+    const minEl = document.getElementById('statMinGap');
+    minEl.textContent = minGap+' frames';
+    if(minGap < smoothWindow) minEl.classList.add('warn');
+    document.getElementById('statMaxGap').textContent = maxGap+' frames';
+  }
+
+  // ---- gedeelde zoom/pan-status: alle 3 grafieken tonen altijd hetzelfde tijdvenster ----
+  const view = { min: 0, max: tMax };
+
+  // ---- generieke chart-helper: tekent assen/grid, roept dan een per-grafiek
+  //      teken-callback aan voor de eigenlijke data. Zo hoeft de pan/zoom-
+  //      logica maar één keer geschreven te worden voor alle 3 grafieken. ----
+  function makeChart(canvasId, yLabelTop, yLabelBottom, drawSeries){
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext('2d');
+    let cssWidth = canvas.clientWidth;
+    const DPR = window.devicePixelRatio || 1;
+    const H = 220, padL = 46, padR = 14, padT = 10, padB = 26;
+    const chartObj = { canvas, padL, padR, padT, padB, H };
+
+    function resize(){
+      cssWidth = canvas.clientWidth;
+      canvas.width = cssWidth*DPR; canvas.height = H*DPR;
+      ctx.setTransform(DPR,0,0,DPR,0,0);
+      draw();
+    }
+    function xPix(tt){ return padL + ((tt-view.min)/(view.max-view.min)) * (cssWidth-padL-padR); }
+    function plotW(){ return cssWidth-padL-padR; }
+    function plotH(){ return H-padT-padB; }
+
+    function draw(){
+      ctx.clearRect(0,0,cssWidth,H);
+      // rasterlijnen + tijd-as labels (gedeeld tijdvenster dus zelfde op elke grafiek)
+      ctx.strokeStyle = '#242832'; ctx.lineWidth = 1;
+      ctx.font = '11px -apple-system,Segoe UI,Roboto,sans-serif'; ctx.fillStyle = '#9aa4b2';
+      const span = view.max-view.min;
+      let step = Math.pow(10, Math.floor(Math.log10(span/8)));
+      if(span/step > 15) step*=2;
+      if(span/step > 15) step*=2.5;
+      if(span/step < 4) step/=2;
+      let gStart = Math.ceil(view.min/step)*step;
+      for(let gv=gStart; gv<=view.max; gv+=step){
+        const gx = xPix(gv);
+        ctx.beginPath(); ctx.moveTo(gx,padT); ctx.lineTo(gx,H-padB); ctx.stroke();
+        ctx.fillText(gv.toFixed(step<1?2:(step<10?1:0))+'s', gx-12, H-8);
+      }
+      ctx.fillText(yLabelTop, 4, padT+10);
+      ctx.fillText(yLabelBottom, 4, H-padB-2);
+
+      drawSeries(ctx, xPix, plotW(), plotH(), padT, padB, chartObj);
+
+      ctx.strokeStyle = '#3a4150';
+      ctx.beginPath(); ctx.moveTo(padL,H-padB); ctx.lineTo(cssWidth-padR,H-padB); ctx.stroke();
+    }
+
+    chartObj.draw = draw; chartObj.resize = resize; chartObj.xPix = xPix;
+    chartObj.plotW = plotW; chartObj.plotH = plotH;
+    window.addEventListener('resize', resize);
+    return chartObj;
+  }
+
+  // ---- binaire zoek naar het eerste/laatste sample-index binnen het huidige
+  //      zoomvenster, zodat we niet elke keer alle punten hoeven te doorlopen ----
+  function findRange(tmin,tmax){
+    let iStart = Math.max(0, Math.floor((tmin/tMax)*N) - 5);
+    let iEnd = Math.min(N-1, Math.ceil((tmax/tMax)*N) + 5);
+    while(iStart>0 && t[iStart]>tmin) iStart--;
+    while(iEnd<N-1 && t[iEnd]<tmax) iEnd++;
+    return [Math.max(0,iStart), Math.min(N-1,iEnd)];
+  }
+
+  // ---- Grafiek 1: genormaliseerd signaal + drempel/hysteresis-band ----
+  const chart1 = makeChart('chartSignal', '1.0', '0.0', (ctx, xPix, plotW, plotH, padT, padB, self) => {
+    const y = v => padT + (1-v)*plotH;
+    // hysteresis-band als gearceerd vlak rond de drempel
+    ctx.fillStyle = 'rgba(240,169,68,0.12)';
+    const yTop = y(Math.min(1,threshold+hyst)), yBot = y(Math.max(0,threshold-hyst));
+    ctx.fillRect(self.padL, yTop, plotW, yBot-yTop);
+    ctx.strokeStyle = '#f0a944'; ctx.setLineDash([4,3]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(self.padL, y(threshold)); ctx.lineTo(self.padL+plotW, y(threshold)); ctx.stroke();
+    ctx.setLineDash([]);
+    // signaallijn
+    const [i0,i1] = findRange(view.min, view.max);
+    ctx.strokeStyle = '#5da8ff'; ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    let started=false;
+    for(let i=i0;i<=i1;i++){
+      const px = xPix(t[i]), py = y(metricNorm[i]);
+      if(!started){ctx.moveTo(px,py); started=true;} else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  });
+
+  // ---- Grafiek 2: frames sinds vorige wisseling, per transitie-moment ----
+  const maxGapAll = transitions.length ? Math.max(...transitions.map(tr=>tr.frames_since_prev)) : 1;
+  const chart2 = makeChart('chartFreq', String(maxGapAll), '0', (ctx, xPix, plotW, plotH, padT, padB, self) => {
+    const yMax = Math.max(maxGapAll, smoothWindow) * 1.1;
+    const y = v => padT + (1 - v/yMax) * plotH;
+    // ondergrens = smoothing-venster: punten hieronder zijn verdacht (mogelijk ruis)
+    ctx.strokeStyle = '#f0a944'; ctx.setLineDash([4,3]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(self.padL, y(smoothWindow)); ctx.lineTo(self.padL+plotW, y(smoothWindow)); ctx.stroke();
+    ctx.setLineDash([]);
+    // per transitie: verticale stok + punt op de gemeten "frames sinds vorige"
+    const bottomY = self.H - self.padB;
+    for(const tr of transitions){
+      if(tr.time < view.min || tr.time > view.max) continue;
+      const px = xPix(tr.time), py = y(tr.frames_since_prev);
+      const suspicious = tr.frames_since_prev < smoothWindow;
+      ctx.strokeStyle = suspicious ? '#e0658f' : '#5b8fe0';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px, bottomY); ctx.lineTo(px, py); ctx.stroke();
+      ctx.fillStyle = suspicious ? '#e0658f' : '#5b8fe0';
+      ctx.beginPath(); ctx.arc(px, py, 2.6, 0, Math.PI*2); ctx.fill();
+    }
+  });
+
+  // ---- Grafiek 3: groen/wit status (blokgolf) ----
+  const chart3 = makeChart('chartStatus', 'groen', 'wit', (ctx, xPix, plotW, plotH, padT, padB) => {
+    const y = s => padT + (1-s)*plotH*0.8 + plotH*0.1;
+    const [i0,i1] = findRange(view.min, view.max);
+    ctx.strokeStyle = '#39d353'; ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    let prevY=null;
+    for(let i=i0;i<=i1;i++){
+      const px = xPix(t[i]); const py = y(state[i]);
+      if(prevY===null){ ctx.moveTo(px,py); }
+      else{ ctx.lineTo(px, prevY); ctx.lineTo(px, py); }
+      prevY = py;
+    }
+    ctx.stroke();
+  });
+
+  function drawAll(){ chart1.draw(); chart2.draw(); chart3.draw(); }
+
+  // ---- interactie: slepen = pannen, scrollen = zoomen; toegepast op alle
+  //      3 canvassen tegelijk zodat ze een gedeelde tijd-as houden ----
+  const charts = [chart1, chart2, chart3];
+  let dragging=false, dragStartX=0, dragStartMin=0, dragStartMax=0;
+  charts.forEach(c=>{
+    c.canvas.addEventListener('mousedown', e=>{
+      dragging=true; dragStartX=e.clientX; dragStartMin=view.min; dragStartMax=view.max;
+    });
+    c.canvas.addEventListener('wheel', e=>{
+      e.preventDefault();
+      const rect = c.canvas.getBoundingClientRect();
+      const mx = (e.clientX-rect.left-c.padL)/c.plotW();
+      const tAtCursor = view.min + mx*(view.max-view.min);
+      const factor = e.deltaY>0 ? 1.15 : 1/1.15;
+      let newSpan = Math.min(tMax, Math.max(0.3, (view.max-view.min)*factor));
+      let nmin = tAtCursor - mx*newSpan, nmax = nmin+newSpan;
+      if(nmin<0){ nmax-=nmin; nmin=0; }
+      if(nmax>tMax){ nmin-=(nmax-tMax); nmax=tMax; }
+      view.min=Math.max(0,nmin); view.max=Math.min(tMax,nmax);
+      drawAll();
+    }, {passive:false});
+  });
+  window.addEventListener('mouseup', ()=>dragging=false);
+  window.addEventListener('mousemove', e=>{
+    if(!dragging) return;
+    const plotW = chart1.plotW();
+    const dx = e.clientX - dragStartX;
+    const dt = -(dx/plotW) * (dragStartMax-dragStartMin);
+    let nmin = dragStartMin+dt, nmax = dragStartMax+dt;
+    if(nmin<0){ nmax-=nmin; nmin=0; }
+    if(nmax>tMax){ nmin-=(nmax-tMax); nmax=tMax; }
+    view.min=Math.max(0,nmin); view.max=Math.min(tMax,nmax);
+    drawAll();
+  });
+
+  document.getElementById('zoomIn').onclick = ()=>{
+    const c=(view.min+view.max)/2, span=(view.max-view.min)*0.6;
+    view.min=Math.max(0,c-span/2); view.max=Math.min(tMax,c+span/2); drawAll();
+  };
+  document.getElementById('zoomOut').onclick = ()=>{
+    const c=(view.min+view.max)/2; let span=Math.min(tMax,(view.max-view.min)/0.6);
+    let nmin=c-span/2, nmax=c+span/2;
+    if(nmin<0){nmax-=nmin;nmin=0;} if(nmax>tMax){nmin-=(nmax-tMax);nmax=tMax;}
+    view.min=Math.max(0,nmin); view.max=Math.min(tMax,nmax); drawAll();
+  };
+  document.getElementById('reset').onclick = ()=>{ view.min=0; view.max=tMax; drawAll(); };
+
+  // ---- tooltip: toont tijd + waarden onder de cursor op alle 3 grafieken ----
+  const tooltip = document.getElementById('tooltip');
+  charts.forEach(c=>{
+    c.canvas.addEventListener('mousemove', e=>{
+      if(dragging){ tooltip.style.display='none'; return; }
+      const rect = c.canvas.getBoundingClientRect();
+      const mx = (e.clientX-rect.left-c.padL)/c.plotW();
+      const tt = view.min + mx*(view.max-view.min);
+      let idx = Math.round((tt/tMax)*(N-1));
+      idx = Math.max(0, Math.min(N-1, idx));
+      tooltip.style.display='block';
+      tooltip.style.left = (e.pageX+12)+'px';
+      tooltip.style.top = (e.pageY+12)+'px';
+      tooltip.innerHTML = `t=${t[idx].toFixed(2)}s &middot; frame ${idx} &middot; status=${state[idx]?'groen':'wit'} &middot; signaal=${metricNorm[idx].toFixed(3)}`;
+    });
+    c.canvas.addEventListener('mouseleave', ()=>{ tooltip.style.display='none'; });
+  });
+
+  charts.forEach(c=>c.resize());
+})();
+</script>
+</body>
+</html>
